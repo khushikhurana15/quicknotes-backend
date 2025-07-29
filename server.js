@@ -15,6 +15,7 @@ const app = express();
 const allowedOrigins = [
   'http://localhost:3000', 
   'https://quicknotes-frontend-orcin.vercel.app',
+  'https://quicknotes-frontend-3r6uxbq94-khushis-projects-72397f9f.vercel.app'
 ];
 
 app.use(cors({
