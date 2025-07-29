@@ -14,6 +14,7 @@ const app = express();
 // Define allowed origins for production
 const allowedOrigins = [
   'http://localhost:3000', 
+  'https://quicknotes-frontend-orcin.vercel.app',
 ];
 
 app.use(cors({
