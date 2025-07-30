@@ -1,19 +1,18 @@
-// controllers/noteController.js
-
 const Note = require('../models/Note');
 const { spawn } = require('child_process');
 const path = require('path');
-const fs = require('fs'); // Keep fs for temp_audio, but remove for uploads
+const fs = require('fs');
 const mongoose = require('mongoose');
 const { v4: uuidv4 } = require('uuid');
-const cloudinary = require('../config/cloudinaryConfig'); // IMPORT CLOUDINARY HERE!
+const cloudinary = require('../config/cloudinaryConfig');
 
 // Helper function to determine Cloudinary resource type
 const getCloudinaryResourceType = (mimetype) => {
+  if (!mimetype) return 'raw'; // If mimetype is missing, default to 'raw' for deletion safety
   if (mimetype.startsWith('image/')) return 'image';
   if (mimetype.startsWith('video/')) return 'video';
   if (mimetype === 'application/pdf') return 'raw'; // PDFs are 'raw' in Cloudinary
-  return 'auto'; // Default or handle unsupported types
+  return 'raw'; // Fallback for any other type - **CHANGED from 'auto' to 'raw'**
 };
 
 // Get all notes for the authenticated user (now handles archived status)
@@ -41,42 +40,34 @@ exports.getAllNotes = async (req, res) => {
 // Create a new note
 exports.createNote = async (req, res) => {
   try {
-    const { title, content, isPinned, tags } = req.body; // Remove mediaPath, mediaType from destructuring
-    let mediaUrl = null; // Will store the Cloudinary URL
-    let mediaType = null; // Will store the determined media type (image, video, application)
+    const { title, content, isPinned, tags } = req.body;
+    let mediaUrl = null;
+    let mediaType = null;
 
-    // --- NEW CLOUDINARY UPLOAD LOGIC FOR CREATE ---
-    if (req.file) { // Check if a file was uploaded by multer
-      // Optional: Add file type validation if you want stricter control
-      // if (!['image/', 'video/', 'application/pdf'].some(type => req.file.mimetype.startsWith(type))) {
-      //   return res.status(400).json({ msg: 'Unsupported file type.' });
-      // }
-
+    if (req.file) {
       try {
         const resourceType = getCloudinaryResourceType(req.file.mimetype);
         const uploadOptions = {
-          folder: 'quicknotes_media', // Folder in your Cloudinary account
+          folder: 'quicknotes_media',
           resource_type: resourceType,
-          format: resourceType === 'raw' ? 'pdf' : undefined, // Explicitly set format for PDFs
-          // If you want to transform images or videos upon upload, add options here
+          format: resourceType === 'raw' ? 'pdf' : undefined,
         };
 
         const result = await cloudinary.uploader.upload(`data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`, uploadOptions);
-        mediaUrl = result.secure_url; // Cloudinary's secure URL
-        mediaType = resourceType === 'raw' ? 'application' : resourceType; // Map 'raw' back to 'application' for frontend
+        mediaUrl = result.secure_url;
+        mediaType = resourceType === 'raw' ? 'application' : resourceType;
       } catch (uploadError) {
         console.error('Cloudinary Upload Error during note creation:', uploadError);
         return res.status(500).json({ message: 'Failed to upload media to cloud storage.' });
       }
     }
-    // --- END NEW CLOUDINARY UPLOAD LOGIC ---
 
     const newNote = new Note({
       title,
       content,
       user: req.user.id,
-      mediaPath: mediaUrl, // Save the Cloudinary URL
-      mediaType: mediaType, // Save the determined type
+      mediaPath: mediaUrl,
+      mediaType: mediaType,
       isPinned: isPinned !== undefined ? isPinned : false,
       tags: Array.isArray(tags) ? tags : []
     });
@@ -89,7 +80,6 @@ exports.createNote = async (req, res) => {
 };
 
 // Get all notes for the authenticated user (NOTE: this might be redundant with getAllNotes now)
-// Keeping it for now, but consider consolidating with getAllNotes if not specifically used elsewhere.
 exports.getNotes = async (req, res) => {
   try {
     const notes = await Note.find({ user: req.user.id })
@@ -207,8 +197,7 @@ exports.getPublicNoteByShareId = async (req, res) => {
             _id: note._id,
             title: note.title,
             content: note.content,
-            // --- MODIFICATION FOR PUBLIC NOTES: Return Cloudinary URL directly ---
-            mediaPath: note.mediaPath, // Now it's already the full Cloudinary URL
+            mediaPath: note.mediaPath,
             mediaType: note.mediaType,
             tags: note.tags,
             createdAt: note.createdAt,
@@ -228,7 +217,7 @@ exports.getPublicNoteByShareId = async (req, res) => {
 // Update a note
 exports.updateNote = async (req, res) => {
   try {
-    const { title, content, isPinned, removeMedia } = req.body; // Add removeMedia to destructuring
+    const { title, content, isPinned, removeMedia } = req.body;
 
     const note = await Note.findOne({ _id: req.params.id, user: req.user.id });
     if (!note) {
@@ -241,8 +230,6 @@ exports.updateNote = async (req, res) => {
       note.isPinned = isPinned;
     }
 
-    // --- CRITICAL FIX FOR TAGS (Corrected Structure) ---
-    // (No change here, this logic is already robust)
     let updatedTags = [];
     if (req.body.tags !== undefined) {
         let incomingTags = req.body.tags;
@@ -282,39 +269,30 @@ exports.updateNote = async (req, res) => {
         }
     }
     note.tags = updatedTags;
-    // --- END CRITICAL FIX FOR TAGS ---
 
-
-    // --- NEW CLOUDINARY UPLOAD/REMOVAL LOGIC FOR UPDATE ---
-    if (removeMedia === 'true') { // Frontend explicitly asked to remove media
-      if (note.mediaPath) { // Only delete from Cloudinary if there's an existing file
+    if (removeMedia === 'true') {
+      if (note.mediaPath) {
         try {
-          // Extract public_id from the Cloudinary URL
-          // Example URL: https://res.cloudinary.com/your_cloud_name/image/upload/v123456789/folder/public_id.jpg
-          // We need 'folder/public_id' or just 'public_id'
           const parts = note.mediaPath.split('/');
-          const folderAndPublicId = parts.slice(parts.indexOf('upload') + 2).join('/').split('.')[0]; // Adjust this based on your Cloudinary folder structure
-          
-          await cloudinary.uploader.destroy(folderAndPublicId, { resource_type: getCloudinaryResourceType(note.mediaType) || 'auto' });
+          const folderAndPublicId = parts.slice(parts.indexOf('upload') + 2).join('/').split('.')[0];
+          // Use the top-level getCloudinaryResourceType
+          await cloudinary.uploader.destroy(folderAndPublicId, { resource_type: getCloudinaryResourceType(note.mediaType) });
           console.log(`Successfully deleted media from Cloudinary: ${folderAndPublicId}`);
         } catch (deleteError) {
           console.error('Cloudinary Delete Error:', deleteError);
-          // Don't necessarily block the update if deletion fails (e.g., file already gone)
         }
       }
       note.mediaPath = undefined;
       note.mediaType = undefined;
     }
 
-    if (req.file) { // If a new file is uploaded
-      // If there was an old media file and it wasn't marked for removal, delete it first
-      // OR, if removeMedia was true but a new file was also uploaded, the new file replaces it.
-      // This means we potentially delete the old one first.
-      if (note.mediaPath && removeMedia !== 'true') { // If old media existed and not already marked for removal
+    if (req.file) {
+      if (note.mediaPath && removeMedia !== 'true') {
          try {
             const parts = note.mediaPath.split('/');
             const folderAndPublicId = parts.slice(parts.indexOf('upload') + 2).join('/').split('.')[0];
-            await cloudinary.uploader.destroy(folderAndPublicId, { resource_type: getCloudinaryResourceType(note.mediaType) || 'auto' });
+            // Use the top-level getCloudinaryResourceType
+            await cloudinary.uploader.destroy(folderAndPublicId, { resource_type: getCloudinaryResourceType(note.mediaType) });
             console.log(`Successfully deleted old media from Cloudinary: ${folderAndPublicId}`);
          } catch (deleteError) {
             console.error('Cloudinary Delete Error for old file:', deleteError);
@@ -330,15 +308,13 @@ exports.updateNote = async (req, res) => {
         };
 
         const result = await cloudinary.uploader.upload(`data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`, uploadOptions);
-        note.mediaPath = result.secure_url; // Save new Cloudinary URL
+        note.mediaPath = result.secure_url;
         note.mediaType = resourceType === 'raw' ? 'application' : resourceType;
       } catch (uploadError) {
         console.error('Cloudinary Upload Error during note update:', uploadError);
         return res.status(500).json({ message: 'Failed to upload new media to cloud storage.' });
       }
     }
-    // --- END NEW CLOUDINARY UPLOAD/REMOVAL LOGIC ---
-
 
     const updatedNote = await note.save();
     res.status(200).json(updatedNote);
@@ -359,11 +335,11 @@ exports.deleteNote = async (req, res) => {
       try {
         const parts = deletedNote.mediaPath.split('/');
         const folderAndPublicId = parts.slice(parts.indexOf('upload') + 2).join('/').split('.')[0];
-        await cloudinary.uploader.destroy(folderAndPublicId, { resource_type: getCloudinaryResourceType(deletedNote.mediaType) || 'auto' });
+        // Use the top-level getCloudinaryResourceType
+        await cloudinary.uploader.destroy(folderAndPublicId, { resource_type: getCloudinaryResourceType(deletedNote.mediaType) });
         console.log(`Successfully deleted media from Cloudinary during note deletion: ${folderAndPublicId}`);
       } catch (deleteError) {
         console.error('Cloudinary Delete Error during note deletion:', deleteError);
-        // Don't necessarily block the deletion of the note if media deletion fails
       }
     }
     // --- END NEW: Delete associated media files from Cloudinary ---
@@ -480,7 +456,8 @@ exports.deleteArchivedNotePermanently = async (req, res) => {
       try {
         const parts = note.mediaPath.split('/');
         const folderAndPublicId = parts.slice(parts.indexOf('upload') + 2).join('/').split('.')[0];
-        await cloudinary.uploader.destroy(folderAndPublicId, { resource_type: getCloudinaryResourceType(note.mediaType) || 'auto' });
+        // Use the top-level getCloudinaryResourceType
+        await cloudinary.uploader.destroy(folderAndPublicId, { resource_type: getCloudinaryResourceType(note.mediaType) });
         console.log(`Successfully deleted media from Cloudinary during permanent deletion: ${folderAndPublicId}`);
       } catch (deleteError) {
         console.error('Cloudinary Delete Error during permanent deletion:', deleteError);
