@@ -1,24 +1,33 @@
 // controllers/noteController.js
 
-const Note = require('../models/Note'); // This line should only appear ONCE at the top
+const Note = require('../models/Note');
 const { spawn } = require('child_process');
 const path = require('path');
-const fs = require('fs');
-const mongoose = require('mongoose'); // Import mongoose to validate ObjectId
-const { v4: uuidv4 } = require('uuid'); // Import uuid for generating unique IDs
+const fs = require('fs'); // Keep fs for temp_audio, but remove for uploads
+const mongoose = require('mongoose');
+const { v4: uuidv4 } = require('uuid');
+const cloudinary = require('../config/cloudinaryConfig'); // IMPORT CLOUDINARY HERE!
+
+// Helper function to determine Cloudinary resource type
+const getCloudinaryResourceType = (mimetype) => {
+  if (mimetype.startsWith('image/')) return 'image';
+  if (mimetype.startsWith('video/')) return 'video';
+  if (mimetype === 'application/pdf') return 'raw'; // PDFs are 'raw' in Cloudinary
+  return 'auto'; // Default or handle unsupported types
+};
 
 // Get all notes for the authenticated user (now handles archived status)
 exports.getAllNotes = async (req, res) => {
   try {
-    const userId = req.user.id; // Assuming user ID is available from authentication middleware
-    const { showArchived } = req.query; // New query parameter
+    const userId = req.user.id;
+    const { showArchived } = req.query;
 
-    let query = { user: userId, isArchived: false }; // Default: get non-archived notes
+    let query = { user: userId, isArchived: false };
 
     if (showArchived === 'true') {
-      query = { user: userId, isArchived: true }; // If requested, get only archived
+      query = { user: userId, isArchived: true };
     } else if (showArchived === 'all') {
-      query = { user: userId }; // Get all notes (archived and non-archived)
+      query = { user: userId };
     }
 
     const notes = await Note.find(query).sort({ createdAt: -1 });
@@ -32,13 +41,42 @@ exports.getAllNotes = async (req, res) => {
 // Create a new note
 exports.createNote = async (req, res) => {
   try {
-    const { title, content, mediaPath, mediaType, isPinned, tags } = req.body;
+    const { title, content, isPinned, tags } = req.body; // Remove mediaPath, mediaType from destructuring
+    let mediaUrl = null; // Will store the Cloudinary URL
+    let mediaType = null; // Will store the determined media type (image, video, application)
+
+    // --- NEW CLOUDINARY UPLOAD LOGIC FOR CREATE ---
+    if (req.file) { // Check if a file was uploaded by multer
+      // Optional: Add file type validation if you want stricter control
+      // if (!['image/', 'video/', 'application/pdf'].some(type => req.file.mimetype.startsWith(type))) {
+      //   return res.status(400).json({ msg: 'Unsupported file type.' });
+      // }
+
+      try {
+        const resourceType = getCloudinaryResourceType(req.file.mimetype);
+        const uploadOptions = {
+          folder: 'quicknotes_media', // Folder in your Cloudinary account
+          resource_type: resourceType,
+          format: resourceType === 'raw' ? 'pdf' : undefined, // Explicitly set format for PDFs
+          // If you want to transform images or videos upon upload, add options here
+        };
+
+        const result = await cloudinary.uploader.upload(`data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`, uploadOptions);
+        mediaUrl = result.secure_url; // Cloudinary's secure URL
+        mediaType = resourceType === 'raw' ? 'application' : resourceType; // Map 'raw' back to 'application' for frontend
+      } catch (uploadError) {
+        console.error('Cloudinary Upload Error during note creation:', uploadError);
+        return res.status(500).json({ message: 'Failed to upload media to cloud storage.' });
+      }
+    }
+    // --- END NEW CLOUDINARY UPLOAD LOGIC ---
+
     const newNote = new Note({
       title,
       content,
       user: req.user.id,
-      mediaPath,
-      mediaType,
+      mediaPath: mediaUrl, // Save the Cloudinary URL
+      mediaType: mediaType, // Save the determined type
       isPinned: isPinned !== undefined ? isPinned : false,
       tags: Array.isArray(tags) ? tags : []
     });
@@ -71,7 +109,7 @@ exports.getNoteById = async (req, res) => {
     res.status(200).json(note);
   } catch (error) {
     console.error('Error fetching note by ID:', error.message);
-    res.status(500).json({ message: 'Server error.', error: error.message }); // Added error detail
+    res.status(500).json({ message: 'Server error.', error: error.message });
   }
 };
 
@@ -84,19 +122,16 @@ exports.getNoteShareInfo = async (req, res) => {
     try {
         const { noteId } = req.params;
 
-        // Validate if the ID is a valid MongoDB ObjectId format
         if (!mongoose.Types.ObjectId.isValid(noteId)) {
             return res.status(400).json({ message: 'Invalid note ID format.' });
         }
 
-        // Find the note belonging to the authenticated user
         const note = await Note.findOne({ _id: noteId, user: req.user.id });
 
         if (!note) {
             return res.status(404).json({ message: 'Note not found or you are not authorized.' });
         }
 
-        // Return whether it's public and its shareId
         res.json({ isPublic: note.isPublic, shareId: note.shareId });
 
     } catch (error) {
@@ -113,7 +148,6 @@ exports.toggleNotePublicStatus = async (req, res) => {
     try {
         const { noteId } = req.params;
 
-        // Validate if the ID is a valid MongoDB ObjectId format
         if (!mongoose.Types.ObjectId.isValid(noteId)) {
             return res.status(400).json({ message: 'Invalid note ID format.' });
         }
@@ -125,12 +159,9 @@ exports.toggleNotePublicStatus = async (req, res) => {
         }
 
         if (req.method === 'POST') {
-            // Logic to ENABLE sharing (or generate if not exists)
-            // Generate a new shareId only if one doesn't exist
             if (!note.shareId) {
                 let newShareId;
                 let isUnique = false;
-                // Loop to ensure the generated shareId is truly unique in the database
                 while (!isUnique) {
                     newShareId = uuidv4();
                     const existingNoteWithShareId = await Note.findOne({ shareId: newShareId });
@@ -140,18 +171,16 @@ exports.toggleNotePublicStatus = async (req, res) => {
                 }
                 note.shareId = newShareId;
             }
-            note.isPublic = true; // Mark the note as public
+            note.isPublic = true;
             await note.save();
             res.status(200).json({ message: 'Note made public', shareId: note.shareId });
 
         } else if (req.method === 'DELETE') {
-            // Logic to DISABLE sharing
             note.isPublic = false;
-            note.shareId = undefined; // Remove the shareId
+            note.shareId = undefined;
             await note.save();
             res.status(200).json({ message: 'Note sharing disabled' });
         } else {
-            // If any other method hits this route, return Method Not Allowed
             return res.status(405).json({ message: 'Method Not Allowed' });
         }
 
@@ -168,27 +197,22 @@ exports.getPublicNoteByShareId = async (req, res) => {
     try {
         const { shareId } = req.params;
 
-        // Find the note by its unique shareId AND ensure it's marked as public
         const note = await Note.findOne({ shareId: shareId, isPublic: true });
 
         if (!note) {
-            // If note not found by shareId or not marked public, return 404
             return res.status(404).json({ message: 'Note not found or not public.' });
         }
 
-        // Return only necessary public fields (strip sensitive user data or unnecessary internal flags)
         const publicNote = {
-            _id: note._id, // Keep _id if useful for frontend, but shareId is primary for lookup
+            _id: note._id,
             title: note.title,
             content: note.content,
-            // Ensure mediaPath includes the full API_URL for public access.
-            // process.env.REACT_APP_API_URL should be set in your .env file
-            mediaPath: note.mediaPath ? `${process.env.REACT_APP_API_URL || 'http://localhost:5000'}${note.mediaPath}` : null,
+            // --- MODIFICATION FOR PUBLIC NOTES: Return Cloudinary URL directly ---
+            mediaPath: note.mediaPath, // Now it's already the full Cloudinary URL
             mediaType: note.mediaType,
             tags: note.tags,
             createdAt: note.createdAt,
             updatedAt: note.updatedAt,
-            // Do NOT include sensitive fields like user ID, isPinned, isArchived, etc.
         };
 
         res.status(200).json(publicNote);
@@ -204,8 +228,7 @@ exports.getPublicNoteByShareId = async (req, res) => {
 // Update a note
 exports.updateNote = async (req, res) => {
   try {
-    const { title, content, isPinned } = req.body;
-    // 'tags' will be handled dynamically based on its presence in req.body
+    const { title, content, isPinned, removeMedia } = req.body; // Add removeMedia to destructuring
 
     const note = await Note.findOne({ _id: req.params.id, user: req.user.id });
     if (!note) {
@@ -219,50 +242,37 @@ exports.updateNote = async (req, res) => {
     }
 
     // --- CRITICAL FIX FOR TAGS (Corrected Structure) ---
+    // (No change here, this logic is already robust)
     let updatedTags = [];
-
-    // Check if tags are explicitly provided in the request body
     if (req.body.tags !== undefined) {
         let incomingTags = req.body.tags;
-
-        // Frontend sends FormData. If multiple tags, it's an array. If one, it might be a string.
-        // It's also possible that `req.body.tags` itself is a stringified array if frontend did JSON.stringify
-        // Handle potential stringification from frontend or previous corruption.
         while (typeof incomingTags === 'string' && incomingTags.startsWith('[') && incomingTags.endsWith(']')) {
             try {
                 incomingTags = JSON.parse(incomingTags);
             } catch (e) {
                 console.error("Backend Update: Failed to parse incoming tags string during unwrapping:", req.body.tags, e);
-                incomingTags = []; // Parsing failed for incoming, default to empty
+                incomingTags = [];
                 break;
             }
         }
-
-        // Ensure it's an array after parsing, and map/trim individual tags
         if (Array.isArray(incomingTags)) {
             updatedTags = incomingTags.map(tag => typeof tag === 'string' ? tag.trim() : String(tag)).filter(tag => tag !== '');
         } else if (typeof incomingTags === 'string' && incomingTags.trim() !== '') {
-            // If it's a single non-array string tag (e.g., "work,urgent" or just "singleTag")
             updatedTags = incomingTags.split(',').map(tag => tag.trim()).filter(tag => tag !== '');
         } else {
             updatedTags = [];
         }
     } else {
-        // If req.body.tags is undefined (meaning tags were not part of the update request),
-        // we need to ensure existing tags from the database are clean.
-        // This is crucial for the "VOICE !!" note that's already corrupted.
-        let existingTags = note.tags; // Get tags currently associated with the note (from DB)
-
+        let existingTags = note.tags;
         while (typeof existingTags === 'string' && existingTags.startsWith('[') && existingTags.endsWith(']')) {
             try {
                 existingTags = JSON.parse(existingTags);
             } catch (e) {
                 console.error("Backend Update: Failed to parse existing tags string during unwrapping:", note.tags, e);
-                existingTags = []; // Parsing failed for existing, default to empty
+                existingTags = [];
                 break;
             }
         }
-
         if (Array.isArray(existingTags)) {
             updatedTags = existingTags.map(tag => typeof tag === 'string' ? tag.trim() : String(tag)).filter(tag => tag !== '');
         } else if (typeof existingTags === 'string' && existingTags.trim() !== '') {
@@ -271,36 +281,64 @@ exports.updateNote = async (req, res) => {
             updatedTags = [];
         }
     }
-
-    // Assign the cleaned and processed tags to the note object
     note.tags = updatedTags;
     // --- END CRITICAL FIX FOR TAGS ---
 
 
-    // Media handling logic
-    if (req.body.removeMedia === 'true') {
-      // If a new file is also uploaded in the same request, the new file takes precedence
-      // We only remove if there's no new file being uploaded
-      if (!req.file) {
-        // Optionally, delete the old file from the file system
-        if (note.mediaPath && fs.existsSync(path.join(__dirname, '..', note.mediaPath))) {
-          fs.unlinkSync(path.join(__dirname, '..', note.mediaPath));
+    // --- NEW CLOUDINARY UPLOAD/REMOVAL LOGIC FOR UPDATE ---
+    if (removeMedia === 'true') { // Frontend explicitly asked to remove media
+      if (note.mediaPath) { // Only delete from Cloudinary if there's an existing file
+        try {
+          // Extract public_id from the Cloudinary URL
+          // Example URL: https://res.cloudinary.com/your_cloud_name/image/upload/v123456789/folder/public_id.jpg
+          // We need 'folder/public_id' or just 'public_id'
+          const parts = note.mediaPath.split('/');
+          const folderAndPublicId = parts.slice(parts.indexOf('upload') + 2).join('/').split('.')[0]; // Adjust this based on your Cloudinary folder structure
+          
+          await cloudinary.uploader.destroy(folderAndPublicId, { resource_type: getCloudinaryResourceType(note.mediaType) || 'auto' });
+          console.log(`Successfully deleted media from Cloudinary: ${folderAndPublicId}`);
+        } catch (deleteError) {
+          console.error('Cloudinary Delete Error:', deleteError);
+          // Don't necessarily block the update if deletion fails (e.g., file already gone)
         }
-        note.mediaPath = undefined;
-        note.mediaType = undefined;
       }
+      note.mediaPath = undefined;
+      note.mediaType = undefined;
     }
 
-    if (req.file) {
-      // If there was an old media file, delete it first
-      if (note.mediaPath && fs.existsSync(path.join(__dirname, '..', note.mediaPath))) {
-        fs.unlinkSync(path.join(__dirname, '..', note.mediaPath));
+    if (req.file) { // If a new file is uploaded
+      // If there was an old media file and it wasn't marked for removal, delete it first
+      // OR, if removeMedia was true but a new file was also uploaded, the new file replaces it.
+      // This means we potentially delete the old one first.
+      if (note.mediaPath && removeMedia !== 'true') { // If old media existed and not already marked for removal
+         try {
+            const parts = note.mediaPath.split('/');
+            const folderAndPublicId = parts.slice(parts.indexOf('upload') + 2).join('/').split('.')[0];
+            await cloudinary.uploader.destroy(folderAndPublicId, { resource_type: getCloudinaryResourceType(note.mediaType) || 'auto' });
+            console.log(`Successfully deleted old media from Cloudinary: ${folderAndPublicId}`);
+         } catch (deleteError) {
+            console.error('Cloudinary Delete Error for old file:', deleteError);
+         }
       }
-      note.mediaPath = `/uploads/${req.file.filename}`;
-      note.mediaType = req.file.mimetype.startsWith('image/') ? 'image' :
-                       req.file.mimetype.startsWith('video/') ? 'video' :
-                       req.file.mimetype === 'application/pdf' ? 'application' : null;
+
+      try {
+        const resourceType = getCloudinaryResourceType(req.file.mimetype);
+        const uploadOptions = {
+          folder: 'quicknotes_media',
+          resource_type: resourceType,
+          format: resourceType === 'raw' ? 'pdf' : undefined,
+        };
+
+        const result = await cloudinary.uploader.upload(`data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`, uploadOptions);
+        note.mediaPath = result.secure_url; // Save new Cloudinary URL
+        note.mediaType = resourceType === 'raw' ? 'application' : resourceType;
+      } catch (uploadError) {
+        console.error('Cloudinary Upload Error during note update:', uploadError);
+        return res.status(500).json({ message: 'Failed to upload new media to cloud storage.' });
+      }
     }
+    // --- END NEW CLOUDINARY UPLOAD/REMOVAL LOGIC ---
+
 
     const updatedNote = await note.save();
     res.status(200).json(updatedNote);
@@ -315,7 +353,21 @@ exports.deleteNote = async (req, res) => {
   try {
     const deletedNote = await Note.findOneAndDelete({ _id: req.params.id, user: req.user.id });
     if (!deletedNote) return res.status(404).json({ message: 'Note not found or not authorized' });
-    // TODO: Consider deleting associated media files from 'uploads' directory
+
+    // --- NEW: Delete associated media files from Cloudinary ---
+    if (deletedNote.mediaPath) {
+      try {
+        const parts = deletedNote.mediaPath.split('/');
+        const folderAndPublicId = parts.slice(parts.indexOf('upload') + 2).join('/').split('.')[0];
+        await cloudinary.uploader.destroy(folderAndPublicId, { resource_type: getCloudinaryResourceType(deletedNote.mediaType) || 'auto' });
+        console.log(`Successfully deleted media from Cloudinary during note deletion: ${folderAndPublicId}`);
+      } catch (deleteError) {
+        console.error('Cloudinary Delete Error during note deletion:', deleteError);
+        // Don't necessarily block the deletion of the note if media deletion fails
+      }
+    }
+    // --- END NEW: Delete associated media files from Cloudinary ---
+
     res.status(200).json({ message: 'Note deleted' });
   } catch (error) {
     console.error('Error deleting note:', error.message);
@@ -340,7 +392,7 @@ exports.textToSpeech = async (req, res) => {
   const audioFilePath = path.join(audioDir, audioFileName);
 
   try {
-    const pythonProcess = spawn('python3', [
+    const pythonProcess = spawn('python3', [ // Ensure 'python3' is available on Render, or 'python'
       path.join(__dirname, '../tts_script.py'),
       text,
       audioFilePath
@@ -383,7 +435,7 @@ exports.archiveNote = async (req, res) => {
     const note = await Note.findOneAndUpdate(
       { _id: req.params.id, user: req.user.id, isArchived: false },
       { $set: { isArchived: true } },
-      { new: true } // Return the updated document
+      { new: true }
     );
 
     if (!note) {
@@ -423,7 +475,18 @@ exports.deleteArchivedNotePermanently = async (req, res) => {
     if (!note) {
       return res.status(404).json({ msg: 'Archived note not found' });
     }
-    // TODO: Consider deleting associated media files from 'uploads' directory if it's an archived note with media
+    // --- NEW: Delete associated media files from Cloudinary for permanently deleted archived notes ---
+    if (note.mediaPath) {
+      try {
+        const parts = note.mediaPath.split('/');
+        const folderAndPublicId = parts.slice(parts.indexOf('upload') + 2).join('/').split('.')[0];
+        await cloudinary.uploader.destroy(folderAndPublicId, { resource_type: getCloudinaryResourceType(note.mediaType) || 'auto' });
+        console.log(`Successfully deleted media from Cloudinary during permanent deletion: ${folderAndPublicId}`);
+      } catch (deleteError) {
+        console.error('Cloudinary Delete Error during permanent deletion:', deleteError);
+      }
+    }
+    // --- END NEW: Delete associated media files from Cloudinary ---
     res.json({ msg: 'Note permanently deleted' });
   } catch (err) {
     console.error(err.message);

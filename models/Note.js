@@ -14,10 +14,10 @@ const noteSchema = new mongoose.Schema({
     type: String,
     required: true,
   },
-  mediaPath: {
+  mediaPath: { // This will store the Cloudinary URL for any media type
     type: String,
   },
-  mediaType: { //  field to store 'image', 'video', or 'application' (for PDF)
+  mediaType: { // This will store 'image', 'video', or 'application' (for PDF)
     type: String,
   },
   isPinned: {
@@ -31,18 +31,18 @@ const noteSchema = new mongoose.Schema({
   isArchived: {
     type: Boolean,
     default: false,
-  }, // <--- ADDED COMMA HERE
+  },
   isPublic: {
     type: Boolean,
     default: false
   },
   shareId: {
     type: String,
-    unique: true, // Ensure share IDs are unique
-    sparse: true, // Allows null values, so notes without a shareId don't violate uniqueness
+    unique: true,
+    sparse: true,
     required: false,
   }
-}, { // This closing curly brace closes the schema definition object
+}, {
   timestamps: true
 });
 
